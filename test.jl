@@ -7,6 +7,21 @@ include("readdataset.jl")
 
 Random.seed!(123)
 
+function multiclass_accuracy(x::AbstractMatrix{T}, y::AbstractMatrix{T}, a::AbstractMatrix{T}) where {T <: Real}
+	m, n = size(a)
+	c = size(y, 2)
+	probs = softmax(a * x)
+
+	correct = 0
+	for i in 1:m
+		pred_class = argmax(probs[i, :])
+		true_class = argmax(y[i, :])
+		correct += (pred_class == true_class)
+	end
+
+	return correct / m
+end
+
 function l1_logistic_loss(x::AbstractVector{T}, y::AbstractVector{T}, a::AbstractMatrix{T}) where {T <: Real}
 	m = size(a, 1)
 	loss = 0.0
@@ -77,6 +92,12 @@ function simulator_logistic(x::AbstractVector{T}, y::AbstractVector{T}, a::Abstr
 	return f, gradient
 end
 
+function simulator_cross_entropy(x::AbstractMatrix{T}, y::AbstractMatrix{T}, a::AbstractMatrix{T}) where {T <: Real}
+	f=cross_entropy_loss(x, y, a)
+	gradient=cross_entropy_gradient(x, y, a)
+	return f, gradient
+end
+
 
 function svm_loss(training_data_set_path::String, testing_data_set_path::String, iter::Int, eta::Float64, epsilon::Float64, columnsa::Int, D::Float64, gamma::Float64, beta::Float64, beta1::Float64, beta2::Float64, alpha::Float64, beta3::Float64)
 
@@ -110,9 +131,19 @@ function svm_loss(training_data_set_path::String, testing_data_set_path::String,
 	return accuracy1, accuracy2, accuracy3, accuracy4, accuracy5, accuracy6
 end
 
-function test_svm_loss(training_data_set_path::String, testing_data_set_path::String, epsilon::Float64, columnsa::Int)
+function one_hot(y::Vector, K::Int, classmap::Dict{Int, Int})
+	m = length(y)
+	Y = zeros(Float64, m, K)
+	for i in 1:m
+		Y[i, classmap[Int(y[i])]] = 1.0
+	end
+	return Y
+end
 
-	iters=Vector(1:1:100)
+function test_svm_loss(training_data_set_path::String, testing_data_set_path::String, epsilon::Float64, columnsa::Int, nbClass::Int)
+
+	# iters=Vector(1:1:100)
+	iters=Vector(1:1:50)
 
 	# Adaptive optimizer parameters
 	Ds=[10^(-3), 10^(-2), 10^(-1), 1.0, 10.0]
@@ -188,16 +219,31 @@ function test_svm_loss(training_data_set_path::String, testing_data_set_path::St
 	max_ac6s = -1
 
 	# Read the training dataset
-	a, y = read_dataset(training_data_set_path, columnsa)
-	# Define the simulator function for the logistic loss
+
+
+	a, y, classmap = read_dataset(training_data_set_path, columnsa, nbClass)
+	atest, ytest, _ = read_dataset(testing_data_set_path, columnsa, nbClass)
+
+	print("Testing dataset loaded.")
 	simulator=(x::AbstractVector) -> return simulator_logistic(x, y, a)
-	# Read the testing dataset
-	atest, ytest = read_dataset(testing_data_set_path, columnsa)
+	x0=zeros(size(a, 2))
+
+	compute_accuracy = (x::AbstractVector, y::AbstractVector, a::AbstractMatrix) -> return sum(sign.(a * x) .== y) / length(y)
+
+
+	if nbClass > 2
+		x0=zeros(size(a, 2), nbClass)
+		y = one_hot(y, nbClass, classmap)
+		ytest = one_hot(ytest, nbClass, classmap)
+		# Define the simulator function for the cross-entropy loss
+		simulator=(x::AbstractMatrix) -> return simulator_cross_entropy(x, y, a)
+		compute_accuracy = (x::AbstractMatrix, y::AbstractMatrix, a::AbstractMatrix) -> return multiclass_accuracy(x, y, a)
+	end
 
 	# Find best values of the parameters and compute the objective along iterations for the adaptive optimizer
 	for (j, D) in enumerate(Ds)
-		x=zeros(size(a, 2))
-		x1, fs1, ac1s=adaptive_optimizer(x, simulator, iters, D, atest, ytest)
+		x=copy(x0)
+		x1, fs1, ac1s=adaptive_optimizer(x, simulator, iters, D, atest, ytest, compute_accuracy)
 		if maximum(ac1s) > max_ac1
 			max_ac1 = maximum(ac1s)
 			best_D_adap = D
@@ -208,8 +254,8 @@ function test_svm_loss(training_data_set_path::String, testing_data_set_path::St
 
 	# Find best values of the parameters and compute the objective along iterations for the adaptive optimizer coordinate-wise
 	for (j, D) in enumerate(Ds)
-		x=zeros(size(a, 2))
-		x2, fs2, ac2s=adaptive_optimizer_cwise(x, simulator, iters, D, epsilon, atest, ytest)
+		x=copy(x0)
+		x2, fs2, ac2s=adaptive_optimizer_cwise(x, simulator, iters, D, epsilon, atest, ytest, compute_accuracy)
 		if maximum(ac2s) > max_ac2
 			max_ac2 = maximum(ac2s)
 			best_D_adapwise = D
@@ -220,8 +266,8 @@ function test_svm_loss(training_data_set_path::String, testing_data_set_path::St
 
 	# Find best values of the parameters and compute the objective along iterations for adagrad
 	for (j, eta) in enumerate(etas)
-		x=zeros(size(a, 2))
-		x3, fs3, ac3s=adagrad(x, simulator, iters, eta, epsilon, atest, ytest)
+		x=copy(x0)
+		x3, fs3, ac3s=adagrad(x, simulator, iters, eta, epsilon, atest, ytest, compute_accuracy)
 		if maximum(ac3s) > max_ac3
 			max_ac3 = maximum(ac3s)
 			best_eta_adagrad = eta
@@ -234,8 +280,8 @@ function test_svm_loss(training_data_set_path::String, testing_data_set_path::St
 	for (j, gamma) in enumerate(gammas)
 		for (k, beta) in enumerate(betas)
 			for (l, beta3) in enumerate(beta3s)
-				x=zeros(size(a, 2))
-				x4, fs4, ac4s=ema(x, simulator, iters, beta, gamma, epsilon, beta3, atest, ytest)
+				x=copy(x0)
+				x4, fs4, ac4s=ema(x, simulator, iters, beta, gamma, epsilon, beta3, atest, ytest, compute_accuracy)
 				if maximum(ac4s) > max_ac4
 					max_ac4 = maximum(ac4s)
 					best_emagamma=gamma
@@ -252,8 +298,8 @@ function test_svm_loss(training_data_set_path::String, testing_data_set_path::St
 	for (j, gamma) in enumerate(gammas)
 		for (k, beta) in enumerate(betas)
 			for (l, beta3) in enumerate(beta3s)
-				x=zeros(size(a, 2))
-				x5, fs5, ac5s=emawise(x, simulator, iters, beta, gamma, epsilon, beta3, atest, ytest)
+				x=copy(x0)
+				x5, fs5, ac5s=emawise(x, simulator, iters, beta, gamma, epsilon, beta3, atest, ytest, compute_accuracy)
 				if maximum(ac5s) > max_ac5
 					max_ac5 = maximum(ac5s)
 					best_emawisegamma=gamma
@@ -270,8 +316,8 @@ function test_svm_loss(training_data_set_path::String, testing_data_set_path::St
 	for (j, beta1) in enumerate(beta1s)
 		for (k, beta2) in enumerate(beta2s)
 			for (l, alpha) in enumerate(alphas)
-				x=zeros(size(a, 2))
-				x6, fs6, ac6s=adam(x, simulator, iters, beta1, beta2, epsilon, alpha, atest, ytest)
+				x=copy(x0)
+				x6, fs6, ac6s=adam(x, simulator, iters, beta1, beta2, epsilon, alpha, atest, ytest, compute_accuracy)
 
 				if maximum(ac6s) > max_ac6
 					max_ac6 = maximum(ac6s)
@@ -286,21 +332,21 @@ function test_svm_loss(training_data_set_path::String, testing_data_set_path::St
 	end
 
 	# Plot the accuracy
+	name = splitext(basename(training_data_set_path))[1]
 	abscissa = iters
-	p = plot(abscissa, max_ac1s, label = "Adaptive optimizer", xlabel = "Iterations", ylabel = "Accuracy", title = "Accuracy along iterations", linestyle = :solid)
-	plot!(p, abscissa, max_ac2s, label = "Adaptive optimizer coordinate-wise", linestyle = :dash)
+	p = plot(abscissa, max_ac1s, label = "Flex optimizer", xlabel = "Iterations", ylabel = "Accuracy", title = name, linestyle = :solid)
+	plot!(p, abscissa, max_ac2s, label = "Flex optimizer coordinate-wise", linestyle = :dash)
 	plot!(p, abscissa, max_ac3s, label = "Adagrad", linestyle = :dash)
 	plot!(p, abscissa, max_ac4s, label = "EMA", linestyle = :dash)
 	plot!(p, abscissa, max_ac5s, label = "EMA coordinate-wise", linestyle = :dash)
 	plot!(p, abscissa, max_ac6s, label = "ADAM", linestyle = :dash)
 	display(p)
-	name = splitext(basename(training_data_set_path))[1]
 	@show name
 	savefig(p, "$(name).pdf")
 
 	abscissa = iters
-	p = plot(abscissa, best_fs1, label = "Adaptive optimizer", xlabel = "Iterations", ylabel = "Objective function", title = "Evolution of the objective function along iterations", linestyle = :solid)
-	plot!(p, abscissa, best_fs2, label = "Adaptive optimizer coordinate-wise", linestyle = :dash)
+	p = plot(abscissa, best_fs1, label = "Flex optimizer", xlabel = "Iterations", ylabel = "Objective function", title = name, linestyle = :solid)
+	plot!(p, abscissa, best_fs2, label = "Flex optimizer coordinate-wise", linestyle = :dash)
 	plot!(p, abscissa, best_fs3, label = "Adagrad", linestyle = :dash)
 	plot!(p, abscissa, best_fs4, label = "EMA", linestyle = :dash)
 	plot!(p, abscissa, best_fs5, label = "EMA coordinate-wise", linestyle = :dash)
@@ -312,24 +358,24 @@ function test_svm_loss(training_data_set_path::String, testing_data_set_path::St
 
 end
 
-# test_svm_loss("Data_SVM/a1a.txt", "Data_SVM_Testing/a1a.t", 10^(-5), 123)
-# test_svm_loss("Data_SVM/a2a.txt", "Data_SVM_Testing/a2a.t", 10^(-5), 123)
+# test_svm_loss("Data_SVM/a1a.txt", "Data_SVM_Testing/a1a.t", 10^(-5), 123, 2)
+# test_svm_loss("Data_SVM/a2a.txt", "Data_SVM_Testing/a2a.t", 10^(-5), 123, 2)
 
-test_svm_loss("Data_SVM/sensorless.txt", "Data_SVM_Testing/sensorless.t", 10^(-5), 48)
-# test_svm_loss("Data_SVM/aloi.txt", "Data_SVM_Testing/aloi.t", 10^(-5), 128)
-# test_svm_loss("Data_SVM/dna.txt", "Data_SVM_Testing/dna.t", 10^(-5), 180)
-# test_svm_loss("Data_SVM/glass.txt", "Data_SVM_Testing/glass.t", 10^(-5), 9)
-# test_svm_loss("Data_SVM/iris.txt", "Data_SVM_Testing/iris.t", 10^(-5), 4)
-# test_svm_loss("Data_SVM/letter.txt", "Data_SVM_Testing/letter.t", 10^(-5), 16)
-# test_svm_loss("Data_SVM/pendigits.txt", "Data_SVM_Testing/pendigits.t", 10^(-5), 16)
+# test_svm_loss("Data_SVM/sensorless.txt", "Data_SVM_Testing/sensorless.t", 10^(-5), 48, 11)
+test_svm_loss("Data_SVM/aloi.txt", "Data_SVM_Testing/aloi.t", 10^(-5), 128, 1000)
+# test_svm_loss("Data_SVM/dna.txt", "Data_SVM_Testing/dna.t", 10^(-5), 180,3)
+# test_svm_loss("Data_SVM/glass.txt", "Data_SVM_Testing/glass.t", 10^(-5), 9,6)
+# test_svm_loss("Data_SVM/iris.txt", "Data_SVM_Testing/iris.t", 10^(-5), 4,3)
+# test_svm_loss("Data_SVM/letter.txt", "Data_SVM_Testing/letter.t", 10^(-5), 16,26)
+# test_svm_loss("Data_SVM/pendigits.txt", "Data_SVM_Testing/pendigits.t", 10^(-5), 16,10)
 
-# test_svm_loss("Data_SVM/a3a.txt", "Data_SVM_Testing/a3a.t", 10^(-5), 123)
-# test_svm_loss("Data_SVM/a4a.txt", "Data_SVM_Testing/a4a.t", 10^(-5), 123)
-# test_svm_loss("Data_SVM/a5a.txt", "Data_SVM_Testing/a5a.t", 10^(-5), 123)
-# test_svm_loss("Data_SVM/a6a.txt", "Data_SVM_Testing/a6a.t", 10^(-5), 123)
-# test_svm_loss("Data_SVM/a7a.txt", "Data_SVM_Testing/a7a.t", 10^(-5), 123)
-# test_svm_loss("Data_SVM/a8a.txt", "Data_SVM_Testing/a8a.t", 10^(-5), 123)
-# test_svm_loss("Data_SVM/a9a.txt", "Data_SVM_Testing/a9a.t", 10^(-5), 123)
+# test_svm_loss("Data_SVM/a3a.txt", "Data_SVM_Testing/a3a.t", 10^(-5), 123, 2)
+# test_svm_loss("Data_SVM/a4a.txt", "Data_SVM_Testing/a4a.t", 10^(-5), 123, 2)
+# test_svm_loss("Data_SVM/a5a.txt", "Data_SVM_Testing/a5a.t", 10^(-5), 123, 2)
+# test_svm_loss("Data_SVM/a6a.txt", "Data_SVM_Testing/a6a.t", 10^(-5), 123, 2)
+# test_svm_loss("Data_SVM/a7a.txt", "Data_SVM_Testing/a7a.t", 10^(-5), 123, 2)
+# test_svm_loss("Data_SVM/a8a.txt", "Data_SVM_Testing/a8a.t", 10^(-5), 123, 2)
+# test_svm_loss("Data_SVM/a9a.txt", "Data_SVM_Testing/a9a.t", 10^(-5), 123, 2)
 # test_svm_loss("Data_SVM/australian.txt","Data_SVM_Testing/australian.t",1000,0.01,10^(-5))
 # test_svm_loss("Data_SVM/breast-cancer.txt","Data_SVM_Testing/breast-cancer.t",1000,0.01,10^(-5))
 # test_svm_loss("Data_SVM/cod-ma.txt","Data_SVM_Testing/cod-ma.t",1000,0.01,10^(-5))
