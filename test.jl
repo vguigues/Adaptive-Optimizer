@@ -147,16 +147,21 @@ function test_svm_loss(training_data_set_path::String, testing_data_set_path::St
 	# iters=Vector(1:1:100)
 	iters=Vector(1:1:50)
 
-	# Adaptive optimizer parameters
+	# Adaptive optimizer coordinate-wise parameters
 	Ds=[10^(-3), 10^(-2), 10^(-1), 1.0, 10.0]
 
 	# Adagrad parameters
 	etas=[10^(-3), 10^(-2), 10^(-1), 1.0, 10.0]
 
-	# EMA parameters
+	# EMA coordinate-wise and BCOS-g parameters
 	gammas=[10^(-3), 10^(-2), 10^(-1), 1.0, 10.0]
 	betas=[0.9, 0.96, 0.98]
 	beta3s=[0.9, 0.96, 0.98]
+
+	# GradaGrad parameters (Algorithm 1, simplified scalar variant)
+	gradagrad_gamma0s=[10^(-3), 10^(-2), 10^(-1), 1.0]
+	gradagrad_rhos=[1.0, 2.0, 4.0]
+	gradagrad_rs=[0.25, 0.5, 1.0]
 
 	# ADAM parameters
 	beta1s=[0.9, 0.99, 0.999]
@@ -170,8 +175,9 @@ function test_svm_loss(training_data_set_path::String, testing_data_set_path::St
 	max_ac5 = 0
 	max_ac6 = 0
 
-	# Best adaptive optimizer parameters
-	best_D_adap=0
+	# Best BCOS-g parameters
+	best_bcos_eta=0.0
+	best_bcos_beta=0.0
 
 	# Best adaptive optimizer coordinate-wise parameters
 	best_D_adapwise=0
@@ -179,10 +185,10 @@ function test_svm_loss(training_data_set_path::String, testing_data_set_path::St
 	# Best adagrad parameters
 	best_eta_adagrad=0
 
-	# Best EMA parameters
-	best_emagamma=0
-	best_emabeta=0
-	best_emabeta3=0
+	# Best GradaGrad parameters
+	best_gradagrad_gamma0=0.0
+	best_gradagrad_rho=0.0
+	best_gradagrad_r=0.0
 
 	# Best EMA coordinate-wise parameters
 	best_emawisegamma=0
@@ -194,26 +200,26 @@ function test_svm_loss(training_data_set_path::String, testing_data_set_path::St
 	best_beta2=0
 	best_alpha=0
 
-	# Adaptove optimizer objective function values
+	# BCOS-g objective function values
 	best_fs1=[]
 	# Adaptive optimizer coordinate-wise objective function values
 	best_fs2=[]
 	# Adagrad objective function values
 	best_fs3=[]
-	# EMA objective function values
+	# GradaGrad objective function values
 	best_fs4=[]
 	# EMA coordinate-wise objective function values
 	best_fs5=[]
 	# ADAM objective function values
 	best_fs6=[]
 
-	# Best accuracy adaptive optimizer
+	# Best accuracy BCOS-g
 	max_ac1s = -1
 	# Best accuracy adaptive optimizer coordinate-wise
 	max_ac2s = -1
 	# Best accuracy adagrad
 	max_ac3s = -1
-	# Best accuracy EMA
+	# Best accuracy GradaGrad
 	max_ac4s = -1
 	# Best accuracy EMA coordinate-wise
 	max_ac5s = -1
@@ -242,15 +248,19 @@ function test_svm_loss(training_data_set_path::String, testing_data_set_path::St
 		compute_accuracy = (x::AbstractMatrix, y::AbstractMatrix, a::AbstractMatrix) -> return multiclass_accuracy(x, y, a)
 	end
 
-	# Find best values of the parameters and compute the objective along iterations for the adaptive optimizer
-	for (j, D) in enumerate(Ds)
-		x=copy(x0)
-		x1, fs1, ac1s=adaptive_optimizer(x, simulator, iters, D, atest, ytest, compute_accuracy)
-		if maximum(ac1s) > max_ac1
-			max_ac1 = maximum(ac1s)
-			best_D_adap = D
-			max_ac1s = ac1s
-			best_fs1=fs1
+	# adaptive_optimizer disabled in this comparison.
+	# Find the best BCOS-g learning rate and smoothing factor.
+	for eta in etas
+		for beta in betas
+			x=copy(x0)
+			x1, fs1, ac1s=bcos_g(x, simulator, iters, eta, beta, epsilon, atest, ytest, compute_accuracy)
+			if maximum(ac1s) > max_ac1
+				max_ac1 = maximum(ac1s)
+				best_bcos_eta = eta
+				best_bcos_beta = beta
+				max_ac1s = ac1s
+				best_fs1=fs1
+			end
 		end
 	end
 
@@ -278,17 +288,18 @@ function test_svm_loss(training_data_set_path::String, testing_data_set_path::St
 		end
 	end
 
-	# Find best values of the parameters and compute the objective along iterations for EMA
-	for (j, gamma) in enumerate(gammas)
-		for (k, beta) in enumerate(betas)
-			for (l, beta3) in enumerate(beta3s)
+	# ema disabled in this comparison.
+	# Find the best parameters for simplified scalar GradaGrad.
+	for gamma0 in gradagrad_gamma0s
+		for rho in gradagrad_rhos
+			for r in gradagrad_rs
 				x=copy(x0)
-				x4, fs4, ac4s=ema(x, simulator, iters, beta, gamma, epsilon, beta3, atest, ytest, compute_accuracy)
+				x4, fs4, ac4s=gradagrad(x, simulator, iters, gamma0, rho, r, atest, ytest, compute_accuracy)
 				if maximum(ac4s) > max_ac4
 					max_ac4 = maximum(ac4s)
-					best_emagamma=gamma
-					best_emabeta=beta
-					best_emabeta3=beta3
+					best_gradagrad_gamma0=gamma0
+					best_gradagrad_rho=rho
+					best_gradagrad_r=r
 					max_ac4s = ac4s
 					best_fs4=fs4
 				end
@@ -343,10 +354,11 @@ function test_svm_loss(training_data_set_path::String, testing_data_set_path::St
 	A6=zeros(nb_iter, length(iters))
 
 	for i ∈ 1:nb_iter
-		x0=rand(size(a, 2))
+		# Preserve the correct vector or matrix shape for binary and multiclass data.
+		x0=rand(Float64, size(x0)...)
 
 		x=copy(x0)
-		x1, fs1, ac1s=adaptive_optimizer(x, simulator, iters, best_D_adap, atest, ytest, compute_accuracy)
+		x1, fs1, ac1s=bcos_g(x, simulator, iters, best_bcos_eta, best_bcos_beta, epsilon, atest, ytest, compute_accuracy)
 		A1[i, :]=ac1s
 
 		x=copy(x0)
@@ -358,7 +370,7 @@ function test_svm_loss(training_data_set_path::String, testing_data_set_path::St
 		A3[i, :]=ac3s
 
 		x=copy(x0)
-		x4, fs4, ac4s=ema(x, simulator, iters, best_emabeta, best_emagamma, epsilon, best_emabeta3, atest, ytest, compute_accuracy)
+		x4, fs4, ac4s=gradagrad(x, simulator, iters, best_gradagrad_gamma0, best_gradagrad_rho, best_gradagrad_r, atest, ytest, compute_accuracy)
 		A4[i, :]=ac4s
 
 		x=copy(x0)
@@ -389,10 +401,10 @@ function test_svm_loss(training_data_set_path::String, testing_data_set_path::St
 	abscissa = iters
 	@show size(abscissa)
 	@show size(mean_ac1s)
-	p = plot(abscissa, mean_ac1s', label = "Flex optimizer", xlabel = "Iterations", ylabel = "Accuracy", title = name, linestyle = :solid)
+	p = plot(abscissa, mean_ac1s', label = "BCOS-g", xlabel = "Iterations", ylabel = "Accuracy", title = name, linestyle = :solid)
 	plot!(p, abscissa, mean_ac2s', label = "Flex optimizer coordinate-wise", linestyle = :dash)
 	plot!(p, abscissa, mean_ac3s', label = "Adagrad", linestyle = :dash)
-	plot!(p, abscissa, mean_ac4s', label = "EMA", linestyle = :dash)
+	plot!(p, abscissa, mean_ac4s', label = "GradaGrad", linestyle = :dash)
 	plot!(p, abscissa, mean_ac5s', label = "EMA coordinate-wise", linestyle = :dash)
 	plot!(p, abscissa, mean_ac6s', label = "ADAM", linestyle = :dash)
 	display(p)
@@ -400,10 +412,10 @@ function test_svm_loss(training_data_set_path::String, testing_data_set_path::St
 	savefig(p, "$(name).pdf")
 
 	abscissa = iters
-	p = plot(abscissa, best_fs1, label = "Flex optimizer", xlabel = "Iterations", ylabel = "Objective function", title = name, linestyle = :solid)
+	p = plot(abscissa, best_fs1, label = "BCOS-g", xlabel = "Iterations", ylabel = "Objective function", title = name, linestyle = :solid)
 	plot!(p, abscissa, best_fs2, label = "Flex optimizer coordinate-wise", linestyle = :dash)
 	plot!(p, abscissa, best_fs3, label = "Adagrad", linestyle = :dash)
-	plot!(p, abscissa, best_fs4, label = "EMA", linestyle = :dash)
+	plot!(p, abscissa, best_fs4, label = "GradaGrad", linestyle = :dash)
 	plot!(p, abscissa, best_fs5, label = "EMA coordinate-wise", linestyle = :dash)
 	plot!(p, abscissa, best_fs6, label = "ADAM", linestyle = :dash)
 	display(p)
@@ -412,10 +424,10 @@ function test_svm_loss(training_data_set_path::String, testing_data_set_path::St
 	savefig(p, "Objective_$(name).pdf")
 
 	abscissa = iters
-	p = plot(abscissa, standard_error_ac1s', label = "Flex optimizer", xlabel = "Iterations", ylabel = "Standard Error", title = name, linestyle = :solid)
+	p = plot(abscissa, standard_error_ac1s', label = "BCOS-g", xlabel = "Iterations", ylabel = "Standard Error", title = name, linestyle = :solid)
 	plot!(p, abscissa, standard_error_ac2s', label = "Flex optimizer coordinate-wise", linestyle = :dash)
 	plot!(p, abscissa, standard_error_ac3s', label = "Adagrad", linestyle = :dash)
-	plot!(p, abscissa, standard_error_ac4s', label = "EMA", linestyle = :dash)
+	plot!(p, abscissa, standard_error_ac4s', label = "GradaGrad", linestyle = :dash)
 	plot!(p, abscissa, standard_error_ac5s', label = "EMA coordinate-wise", linestyle = :dash)
 	plot!(p, abscissa, standard_error_ac6s', label = "ADAM", linestyle = :dash)
 	display(p)
@@ -423,33 +435,34 @@ function test_svm_loss(training_data_set_path::String, testing_data_set_path::St
 	@show name
 	savefig(p, "SE_$(name).pdf")
 
-	println("Standard error of the accuracy at the last iteration for Flex optimizer: ", standard_error_ac1s[end])
+	println("Standard error of the accuracy at the last iteration for BCOS-g: ", standard_error_ac1s[end])
 	println("Standard error of the accuracy at the last iteration for Flex optimizer coordinate-wise: ", standard_error_ac2s[end])
 	println("Standard error of the accuracy at the last iteration for Adagrad: ", standard_error_ac3s[end])
-	println("Standard error of the accuracy at the last iteration for EMA: ", standard_error_ac4s[end])
+	println("Standard error of the accuracy at the last iteration for GradaGrad: ", standard_error_ac4s[end])
 	println("Standard error of the accuracy at the last iteration for EMA coordinate-wise: ", standard_error_ac5s[end])
 	println("Standard error of the accuracy at the last iteration for ADAM: ", standard_error_ac6s[end])
-
 end
 
 test_svm_loss("Data_SVM/a1a.txt", "Data_SVM_Testing/a1a.t", 10^(-5), 123, 2)
-test_svm_loss("Data_SVM/a2a.txt", "Data_SVM_Testing/a2a.t", 10^(-5), 123, 2)
+# test_svm_loss("Data_SVM/a2a.txt", "Data_SVM_Testing/a2a.t", 10^(-5), 123, 2)
 
 # test_svm_loss("Data_SVM/sensorless.txt", "Data_SVM_Testing/sensorless.t", 10^(-5), 48, 11)
 # test_svm_loss("Data_SVM/aloi.txt", "Data_SVM_Testing/aloi.t", 10^(-5), 128, 1000)
-# test_svm_loss("Data_SVM/dna.txt", "Data_SVM_Testing/dna.t", 10^(-5), 180,3)
 # test_svm_loss("Data_SVM/glass.txt", "Data_SVM_Testing/glass.t", 10^(-5), 9,6)
 # test_svm_loss("Data_SVM/iris.txt", "Data_SVM_Testing/iris.t", 10^(-5), 4,3)
-# test_svm_loss("Data_SVM/letter.txt", "Data_SVM_Testing/letter.t", 10^(-5), 16,26)
-# test_svm_loss("Data_SVM/pendigits.txt", "Data_SVM_Testing/pendigits.t", 10^(-5), 16,10)
+test_svm_loss("Data_SVM/pendigits.txt", "Data_SVM_Testing/pendigits.t", 10^(-5), 16,10)
+test_svm_loss("Data_SVM/wine.txt", "Data_SVM_Testing/wine.t", 10^(-5), 13, 3)
+test_svm_loss("Data_SVM/dna.txt", "Data_SVM_Testing/dna.t", 10^(-5), 180,3)
+test_svm_loss("Data_SVM/letter.txt", "Data_SVM_Testing/letter.t", 10^(-5), 16,26)
+test_svm_loss("Data_SVM/usps.txt", "Data_SVM_Testing/usps.t", 10^(-5), 256, 10)
 
-test_svm_loss("Data_SVM/a3a.txt", "Data_SVM_Testing/a3a.t", 10^(-5), 123, 2)
-test_svm_loss("Data_SVM/a4a.txt", "Data_SVM_Testing/a4a.t", 10^(-5), 123, 2)
-test_svm_loss("Data_SVM/a5a.txt", "Data_SVM_Testing/a5a.t", 10^(-5), 123, 2)
-test_svm_loss("Data_SVM/a6a.txt", "Data_SVM_Testing/a6a.t", 10^(-5), 123, 2)
-test_svm_loss("Data_SVM/a7a.txt", "Data_SVM_Testing/a7a.t", 10^(-5), 123, 2)
-test_svm_loss("Data_SVM/a8a.txt", "Data_SVM_Testing/a8a.t", 10^(-5), 123, 2)
-test_svm_loss("Data_SVM/a9a.txt", "Data_SVM_Testing/a9a.t", 10^(-5), 123, 2)
+# test_svm_loss("Data_SVM/a3a.txt", "Data_SVM_Testing/a3a.t", 10^(-5), 123, 2)
+# test_svm_loss("Data_SVM/a4a.txt", "Data_SVM_Testing/a4a.t", 10^(-5), 123, 2)
+# test_svm_loss("Data_SVM/a5a.txt", "Data_SVM_Testing/a5a.t", 10^(-5), 123, 2)
+# test_svm_loss("Data_SVM/a6a.txt", "Data_SVM_Testing/a6a.t", 10^(-5), 123, 2)
+# test_svm_loss("Data_SVM/a7a.txt", "Data_SVM_Testing/a7a.t", 10^(-5), 123, 2)
+# test_svm_loss("Data_SVM/a8a.txt", "Data_SVM_Testing/a8a.t", 10^(-5), 123, 2)
+# test_svm_loss("Data_SVM/a9a.txt", "Data_SVM_Testing/a9a.t", 10^(-5), 123, 2)
 # test_svm_loss("Data_SVM/australian.txt","Data_SVM_Testing/australian.t",1000,0.01,10^(-5))
 # test_svm_loss("Data_SVM/breast-cancer.txt","Data_SVM_Testing/breast-cancer.t",1000,0.01,10^(-5))
 # test_svm_loss("Data_SVM/cod-ma.txt","Data_SVM_Testing/cod-ma.t",1000,0.01,10^(-5))
